@@ -175,6 +175,8 @@ run_toolchain_build() {
         --entrypoint="" \
         "${DOCKER_IMAGE}" \
         bash -c "
+            # Ensure proper permissions for mounted directory
+            sudo chown -R builder:builder /home/builder/work
             cd /home/builder/work
             
             echo 'Container architecture info:'

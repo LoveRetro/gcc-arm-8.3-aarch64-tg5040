@@ -26,11 +26,13 @@ RUN mkdir -p /opt/aarch64-nextui-linux-gnu && \
     chown -R builder:builder /opt/aarch64-nextui-linux-gnu && \
     chown -R builder:builder /opt/x86_64-aarch64-nextui-linux-gnu
 
+# Switch to builder user early to ensure proper permissions
 USER builder
 WORKDIR /home/builder
 
-# Create work directory
-RUN mkdir -p /home/builder/work
+# Create work directory with proper ownership
+RUN mkdir -p /home/builder/work && \
+    sudo chown -R builder:builder /home/builder
 WORKDIR /home/builder/work
 
 ENTRYPOINT ["ct-ng"]
