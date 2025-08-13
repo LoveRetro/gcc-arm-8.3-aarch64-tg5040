@@ -59,12 +59,6 @@ jobs:
             runner_type: x86_64
       fail-fast: false
 
-    # Skip builds based on workflow input
-    if: |
-      (github.event_name != 'workflow_dispatch') || 
-      (github.event.inputs.toolchain_variant == 'all') || 
-      (github.event.inputs.toolchain_variant == matrix.variant)
-
     outputs:
       artifact-name-arm64: ${{ matrix.variant == 'arm64' && steps.artifact-info.outputs.name || '' }}
       artifact-name-x86_64: ${{ matrix.variant == 'x86_64' && steps.artifact-info.outputs.name || '' }}
@@ -78,13 +72,38 @@ jobs:
         with:
           fetch-depth: 1  # Shallow clone for faster checkout
 
+      - name: Check if build should run
+        id: should-build
+        run: |
+          # Determine if this matrix job should run based on workflow input
+          SHOULD_RUN="true"
+          
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VARIANT_INPUT="${{ github.event.inputs.toolchain_variant }}"
+            CURRENT_VARIANT="${{ matrix.variant }}"
+            
+            if [[ "$VARIANT_INPUT" != "all" && "$VARIANT_INPUT" != "$CURRENT_VARIANT" ]]; then
+              SHOULD_RUN="false"
+              echo "Skipping $CURRENT_VARIANT build - only building $VARIANT_INPUT"
+            else
+              echo "Running $CURRENT_VARIANT build - building $VARIANT_INPUT"
+            fi
+          else
+            echo "Running ${{ matrix.variant }} build - triggered by ${{ github.event_name }}"
+          fi
+          
+          echo "should-run=$SHOULD_RUN" >> $GITHUB_OUTPUT
+          echo "Build decision for ${{ matrix.variant }}: $SHOULD_RUN" >> $GITHUB_STEP_SUMMARY
+
       - name: Setup Docker Buildx
+        if: steps.should-build.outputs.should-run == 'true'
         uses: docker/setup-buildx-action@v3
         with:
           driver-opts: image=moby/buildkit:latest
 
       - name: Set build info
         id: build-info
+        if: steps.should-build.outputs.should-run == 'true'
         run: |
           echo "commit=${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
           echo "date=$(date -u +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
@@ -94,12 +113,14 @@ jobs:
 
       - name: Set artifact info
         id: artifact-info
+        if: steps.should-build.outputs.should-run == 'true'
         run: |
           ARTIFACT_NAME="gcc-${{ env.TOOLCHAIN_VERSION }}-${{ matrix.target_arch }}-toolchain-${{ steps.build-info.outputs.commit }}"
           echo "name=${ARTIFACT_NAME}" >> $GITHUB_OUTPUT
           echo "Artifact name: ${ARTIFACT_NAME}" >> $GITHUB_STEP_SUMMARY
 
       - name: Cache Docker layers
+        if: steps.should-build.outputs.should-run == 'true'
         uses: actions/cache@v4
         with:
           path: /tmp/.buildx-cache
@@ -109,6 +130,7 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-buildx-
 
       - name: Cache crosstool-NG sources
+        if: steps.should-build.outputs.should-run == 'true'
         uses: actions/cache@v4
         with:
           path: |
@@ -121,6 +143,7 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-ctng-sources-
 
       - name: Free up disk space
+        if: steps.should-build.outputs.should-run == 'true'
         run: |
           set -x
           echo "=== Disk usage before cleanup ==="
@@ -141,6 +164,7 @@ jobs:
           echo "Available space: $(df -h / | awk 'NR==2{print $4}')" >> $GITHUB_STEP_SUMMARY
 
       - name: Prepare build environment
+        if: steps.should-build.outputs.should-run == 'true'
         run: |
           set -x
           echo "=== Setting up build environment ==="
@@ -157,10 +181,11 @@ jobs:
           echo "CT_TOP_DIR=$HOME/.cache/crosstool-ng" >> $GITHUB_ENV
           echo "CT_WORK_DIR=$HOME/work" >> $GITHUB_ENV
 
-          echo "=== Build environment prepared ===" 
+          echo "=== Build environment prepared ==="
           echo "Native build: ${{ matrix.variant == 'arm64' && runner.arch == 'ARM64' && 'true' || 'false' }}" >> $GITHUB_STEP_SUMMARY
 
       - name: Build toolchain with enhanced logging
+        if: steps.should-build.outputs.should-run == 'true'
         run: |
           set -x
           echo "=== Starting ${{ matrix.variant }} toolchain build ==="
@@ -178,6 +203,7 @@ jobs:
           echo "End time: $(date -u)" >> $GITHUB_STEP_SUMMARY
 
       - name: Verify build output
+        if: steps.should-build.outputs.should-run == 'true'
         run: |
           set -x
           echo "=== Verifying ${{ matrix.variant }} build output ==="
@@ -198,6 +224,7 @@ jobs:
           echo "✓ Tarball integrity verified" >> $GITHUB_STEP_SUMMARY
 
       - name: Optimize artifact compression
+        if: steps.should-build.outputs.should-run == 'true'
         run: |
           set -x
           echo "=== Optimizing artifact compression ==="
@@ -225,6 +252,7 @@ jobs:
 
       - name: Create checksums
         id: create-checksum
+        if: steps.should-build.outputs.should-run == 'true'
         run: |
           set -x
           echo "=== Creating checksums ==="
@@ -242,7 +270,7 @@ jobs:
           cat checksums-${{ matrix.variant }}.txt >> $GITHUB_STEP_SUMMARY
 
       - name: Preserve build logs on failure
-        if: failure()
+        if: failure() && steps.should-build.outputs.should-run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: build-logs-${{ matrix.variant }}-${{ steps.build-info.outputs.commit }}
@@ -253,6 +281,7 @@ jobs:
           compression-level: 0  # Logs are text, don't need compression
 
       - name: Upload toolchain tarball
+        if: steps.should-build.outputs.should-run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.artifact-info.outputs.name }}
@@ -263,6 +292,7 @@ jobs:
           compression-level: 0  # Already compressed with xz
 
       - name: Upload build metadata
+        if: steps.should-build.outputs.should-run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: build-metadata-${{ matrix.variant }}-${{ steps.build-info.outputs.commit }}
