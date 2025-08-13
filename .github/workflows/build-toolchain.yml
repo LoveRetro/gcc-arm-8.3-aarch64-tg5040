@@ -1,0 +1,459 @@
+---
+name: Build Toolchains
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 2 * * 0'  # Weekly on Sundays at 02:00 UTC
+  workflow_dispatch:
+    inputs:
+      toolchain_variant:
+        description: 'Toolchain variant to build'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+        - all
+        - arm64
+        - x86_64
+
+# Security: Define minimal permissions required
+permissions:
+  contents: read
+  actions: read
+  checks: write
+
+env:
+  TOOLCHAIN_VERSION: "8.3.0"
+  DOCKER_REGISTRY: "ghcr.io"
+  CACHE_VERSION: "v1"
+
+jobs:
+  build-toolchain:
+    runs-on: ${{ matrix.variant == 'arm64' && 'ubuntu-24.04-arm64' || 'ubuntu-24.04' }}
+    timeout-minutes: 90  # Reduced from 120 with caching
+    
+    strategy:
+      matrix:
+        include:
+          - variant: arm64
+            target_arch: aarch64-nextui-linux-gnu
+            config_file: aarch64.config
+            build_script: build-toolchain.sh
+            output_package: aarch64-nextui-toolchain.tar.gz
+            toolchain_dir: aarch64-nextui-linux-gnu
+            gcc_binary: aarch64-nextui-linux-gnu-gcc
+            gpp_binary: aarch64-nextui-linux-gnu-g++
+            runner_type: arm64
+          - variant: x86_64
+            target_arch: x86_64-aarch64-nextui-linux-gnu
+            config_file: x86_64-aarch64.config
+            build_script: build-x86_64-toolchain.sh
+            output_package: x86_64-aarch64-nextui-toolchain.tar.gz
+            toolchain_dir: x86_64-aarch64-nextui-linux-gnu
+            gcc_binary: aarch64-nextui-linux-gnu-gcc
+            gpp_binary: aarch64-nextui-linux-gnu-g++
+            runner_type: x86_64
+      fail-fast: false
+
+    # Skip builds based on workflow input
+    if: |
+      (github.event_name != 'workflow_dispatch') || 
+      (github.event.inputs.toolchain_variant == 'all') || 
+      (github.event.inputs.toolchain_variant == matrix.variant)
+
+    outputs:
+      artifact-name-arm64: ${{ matrix.variant == 'arm64' && steps.artifact-info.outputs.name || '' }}
+      artifact-name-x86_64: ${{ matrix.variant == 'x86_64' && steps.artifact-info.outputs.name || '' }}
+      artifact-checksum-arm64: ${{ matrix.variant == 'arm64' && steps.create-checksum.outputs.checksum || '' }}
+      artifact-checksum-x86_64: ${{ matrix.variant == 'x86_64' && steps.create-checksum.outputs.checksum || '' }}
+      build-commit: ${{ steps.build-info.outputs.commit }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1  # Shallow clone for faster checkout
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: image=moby/buildkit:latest
+
+      - name: Set build info
+        id: build-info
+        run: |
+          echo "commit=${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
+          echo "date=$(date -u +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
+          echo "Build started at: $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "Runner architecture: $(uname -m)" >> $GITHUB_STEP_SUMMARY
+          echo "Building ${{ matrix.variant }} toolchain on ${{ matrix.runner_type }} runner" >> $GITHUB_STEP_SUMMARY
+
+      - name: Set artifact info
+        id: artifact-info
+        run: |
+          ARTIFACT_NAME="gcc-${{ env.TOOLCHAIN_VERSION }}-${{ matrix.target_arch }}-toolchain-${{ steps.build-info.outputs.commit }}"
+          echo "name=${ARTIFACT_NAME}" >> $GITHUB_OUTPUT
+          echo "Artifact name: ${ARTIFACT_NAME}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-${{ runner.arch }}-buildx-${{ env.CACHE_VERSION }}-${{ hashFiles('Dockerfile.ct-ng') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-buildx-${{ env.CACHE_VERSION }}-
+            ${{ runner.os }}-${{ runner.arch }}-buildx-
+
+      - name: Cache crosstool-NG sources
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/crosstool-ng
+            ~/src
+          key: ${{ runner.os }}-${{ runner.arch }}-ctng-sources-${{ env.CACHE_VERSION }}-${{ matrix.variant }}-${{ hashFiles(matrix.config_file) }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-ctng-sources-${{ env.CACHE_VERSION }}-${{ matrix.variant }}-
+            ${{ runner.os }}-${{ runner.arch }}-ctng-sources-${{ env.CACHE_VERSION }}-
+            ${{ runner.os }}-${{ runner.arch }}-ctng-sources-
+
+      - name: Free up disk space
+        run: |
+          set -x
+          echo "=== Disk usage before cleanup ==="
+          df -h
+
+          echo "=== Removing unnecessary packages ==="
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf "/usr/local/share/boost"
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/vim/vim*/
+
+          echo "=== Disk usage after cleanup ==="
+          df -h
+
+          echo "=== Available disk space ==="
+          echo "Available space: $(df -h / | awk 'NR==2{print $4}')" >> $GITHUB_STEP_SUMMARY
+
+      - name: Prepare build environment
+        run: |
+          set -x
+          echo "=== Setting up build environment ==="
+          echo "Runner OS: $(uname -s)"
+          echo "Runner Architecture: $(uname -m)"
+          echo "CPU Info: $(nproc) cores"
+          echo "Memory: $(free -h | grep '^Mem:' | awk '{print $2}')"
+
+          # Ensure cache directories exist
+          mkdir -p ~/.cache/crosstool-ng
+          mkdir -p ~/src
+
+          # Set environment variables for caching
+          echo "CT_TOP_DIR=$HOME/.cache/crosstool-ng" >> $GITHUB_ENV
+          echo "CT_WORK_DIR=$HOME/work" >> $GITHUB_ENV
+
+          echo "=== Build environment prepared ===" 
+          echo "Native build: ${{ matrix.variant == 'arm64' && runner.arch == 'ARM64' && 'true' || 'false' }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Build toolchain with enhanced logging
+        run: |
+          set -x
+          echo "=== Starting ${{ matrix.variant }} toolchain build ==="
+          echo "Build jobs: $(nproc)"
+          echo "Available memory: $(free -h)"
+          echo "Start time: $(date -u)" >> $GITHUB_STEP_SUMMARY
+
+          # Make script executable and run with enhanced logging
+          chmod +x ${{ matrix.build_script }}
+
+          # Capture build logs
+          ./${{ matrix.build_script }} 2>&1 | tee build-${{ matrix.variant }}.log
+
+          echo "=== ${{ matrix.variant }} build completed ==="
+          echo "End time: $(date -u)" >> $GITHUB_STEP_SUMMARY
+
+      - name: Verify build output
+        run: |
+          set -x
+          echo "=== Verifying ${{ matrix.variant }} build output ==="
+
+          if [ ! -f "${{ matrix.output_package }}" ]; then
+            echo "ERROR: Toolchain package not found: ${{ matrix.output_package }}!"
+            echo "Available files:"
+            ls -la
+            exit 1
+          fi
+
+          # Show package details
+          PACKAGE_SIZE=$(ls -lh ${{ matrix.output_package }} | awk '{print $5}')
+          echo "Package size: ${PACKAGE_SIZE}" >> $GITHUB_STEP_SUMMARY
+
+          # Test tarball integrity
+          tar -tzf ${{ matrix.output_package }} >/dev/null
+          echo "✓ Tarball integrity verified" >> $GITHUB_STEP_SUMMARY
+
+      - name: Optimize artifact compression
+        run: |
+          set -x
+          echo "=== Optimizing artifact compression ==="
+
+          # Extract and recompress with better compression
+          mkdir -p temp_extract
+          tar -xzf ${{ matrix.output_package }} -C temp_extract
+
+          # Create optimized tar.xz package
+          OPTIMIZED_NAME="${{ matrix.variant }}-toolchain-${{ steps.build-info.outputs.commit }}.tar.xz"
+          tar -cJf "${OPTIMIZED_NAME}" -C temp_extract .
+
+          # Compare sizes
+          ORIGINAL_SIZE=$(stat -c%s "${{ matrix.output_package }}")
+          OPTIMIZED_SIZE=$(stat -c%s "${OPTIMIZED_NAME}")
+          REDUCTION=$(( (ORIGINAL_SIZE - OPTIMIZED_SIZE) * 100 / ORIGINAL_SIZE ))
+
+          echo "Original: $(numfmt --to=iec ${ORIGINAL_SIZE})" >> $GITHUB_STEP_SUMMARY
+          echo "Optimized: $(numfmt --to=iec ${OPTIMIZED_SIZE})" >> $GITHUB_STEP_SUMMARY
+          echo "Reduction: ${REDUCTION}%" >> $GITHUB_STEP_SUMMARY
+
+          # Use optimized version
+          mv "${OPTIMIZED_NAME}" "${{ matrix.variant }}-toolchain.tar.xz"
+          rm -rf temp_extract ${{ matrix.output_package }}
+
+      - name: Create checksums
+        id: create-checksum
+        run: |
+          set -x
+          echo "=== Creating checksums ==="
+
+          # Create multiple hash types
+          sha256sum ${{ matrix.variant }}-toolchain.tar.xz > checksums-${{ matrix.variant }}.txt
+          sha512sum ${{ matrix.variant }}-toolchain.tar.xz >> checksums-${{ matrix.variant }}.txt
+          md5sum ${{ matrix.variant }}-toolchain.tar.xz >> checksums-${{ matrix.variant }}.txt
+
+          # Store SHA256 for output
+          SHA256=$(sha256sum ${{ matrix.variant }}-toolchain.tar.xz | cut -d' ' -f1)
+          echo "checksum=${SHA256}" >> $GITHUB_OUTPUT
+
+          echo "=== Checksums created ==="
+          cat checksums-${{ matrix.variant }}.txt >> $GITHUB_STEP_SUMMARY
+
+      - name: Preserve build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ matrix.variant }}-${{ steps.build-info.outputs.commit }}
+          path: |
+            build-${{ matrix.variant }}.log
+            checksums-${{ matrix.variant }}.txt
+          retention-days: 7
+          compression-level: 0  # Logs are text, don't need compression
+
+      - name: Upload toolchain tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact-info.outputs.name }}
+          path: |
+            ${{ matrix.variant }}-toolchain.tar.xz
+            checksums-${{ matrix.variant }}.txt
+          retention-days: 30
+          compression-level: 0  # Already compressed with xz
+
+      - name: Upload build metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-metadata-${{ matrix.variant }}-${{ steps.build-info.outputs.commit }}
+          path: |
+            build-${{ matrix.variant }}.log
+            ${{ matrix.config_file }}
+          retention-days: 7
+          compression-level: 6
+
+  verify-toolchain:
+    needs: build-toolchain
+    runs-on: ${{ matrix.variant == 'arm64' && 'ubuntu-24.04-arm64' || 'ubuntu-24.04' }}
+    timeout-minutes: 15
+
+    strategy:
+      matrix:
+        variant: [arm64, x86_64]
+        test-type: [basic, extended]
+        include:
+          - variant: arm64
+            target_arch: aarch64-nextui-linux-gnu
+            toolchain_dir: aarch64-nextui-linux-gnu
+            gcc_binary: aarch64-nextui-linux-gnu-gcc
+            gpp_binary: aarch64-nextui-linux-gnu-g++
+            artifact_name_output: artifact-name-arm64
+            checksum_output: artifact-checksum-arm64
+            runner_type: arm64
+          - variant: x86_64
+            target_arch: x86_64-aarch64-nextui-linux-gnu
+            toolchain_dir: x86_64-aarch64-nextui-linux-gnu
+            gcc_binary: aarch64-nextui-linux-gnu-gcc
+            gpp_binary: aarch64-nextui-linux-gnu-g++
+            artifact_name_output: artifact-name-x86_64
+            checksum_output: artifact-checksum-x86_64
+            runner_type: x86_64
+      fail-fast: false
+
+    # Only run if the corresponding build job ran and succeeded
+    if: |
+      always() && 
+      contains(needs.build-toolchain.result, 'success')
+
+    steps:
+      - name: Download toolchain
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-toolchain.outputs[matrix.artifact_name_output] }}
+        continue-on-error: true  # Allow individual toolchain verification to fail
+        id: download
+
+      - name: Verify checksums
+        if: steps.download.outcome == 'success'
+        run: |
+          set -x
+          echo "=== Verifying ${{ matrix.variant }} checksums ==="
+
+          if [ ! -f "checksums-${{ matrix.variant }}.txt" ]; then
+            echo "ERROR: Checksums file not found for ${{ matrix.variant }}!"
+            exit 1
+          fi
+
+          # Verify all checksums
+          echo "Expected checksum: ${{ needs.build-toolchain.outputs[matrix.checksum_output] }}"
+          sha256sum -c checksums-${{ matrix.variant }}.txt
+          sha512sum -c checksums-${{ matrix.variant }}.txt
+          md5sum -c checksums-${{ matrix.variant }}.txt
+
+          echo "✓ All checksums verified for ${{ matrix.variant }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Extract and prepare toolchain
+        if: steps.download.outcome == 'success'
+        run: |
+          set -x
+          echo "=== Extracting ${{ matrix.variant }} toolchain ==="
+
+          # Extract toolchain
+          tar -xJf ${{ matrix.variant }}-toolchain.tar.xz
+
+          # Verify extraction
+          if [ ! -d "${{ matrix.toolchain_dir }}" ]; then
+            echo "ERROR: Toolchain directory not found after extraction: ${{ matrix.toolchain_dir }}!"
+            ls -la
+            exit 1
+          fi
+
+          echo "✓ ${{ matrix.variant }} toolchain extracted successfully" >> $GITHUB_STEP_SUMMARY
+
+      - name: Basic toolchain verification
+        if: matrix.test-type == 'basic' && steps.download.outcome == 'success'
+        run: |
+          set -x
+          echo "=== Basic ${{ matrix.variant }} toolchain verification ==="
+
+          # Test in Docker with pinned Debian version
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -v "$PWD/${{ matrix.toolchain_dir }}:/opt/toolchain" \
+            debian:bullseye-20240211-slim \
+            bash -c "
+              set -x
+              echo '=== ${{ matrix.variant }} Toolchain Info ==='
+              /opt/toolchain/bin/${{ matrix.gcc_binary }} --version
+
+              echo '=== Testing C compilation ==='
+              echo 'int main(){return 0;}' > test.c
+              /opt/toolchain/bin/${{ matrix.gcc_binary }} -o test test.c
+              file test
+
+              echo '=== Testing C++ compilation ==='
+              echo 'int main(){return 0;}' > test.cpp
+              /opt/toolchain/bin/${{ matrix.gpp_binary }} -o test_cpp test.cpp
+              file test_cpp
+
+              echo '=== Toolchain Components ==='
+              ls -la /opt/toolchain/bin/ | grep aarch64
+            " 2>&1 | tee verification-${{ matrix.variant }}.log
+
+          echo "✓ Basic ${{ matrix.variant }} verification completed" >> $GITHUB_STEP_SUMMARY
+
+      - name: Extended toolchain verification
+        if: matrix.test-type == 'extended' && steps.download.outcome == 'success'
+        run: |
+          set -x
+          echo "=== Extended ${{ matrix.variant }} toolchain verification ==="
+
+          # Create comprehensive test program using printf
+          printf '%s\n' \
+            '#include <stdio.h>' \
+            '#include <stdlib.h>' \
+            '#include <string.h>' \
+            '#include <math.h>' \
+            '' \
+            'int main() {' \
+            '    printf("Hello from ARM64 ${{ matrix.variant }} toolchain!\\n");' \
+            '    printf("Math test: sqrt(16) = %f\\n", sqrt(16.0));' \
+            '    ' \
+            '    char* buffer = malloc(100);' \
+            '    strcpy(buffer, "Memory allocation works!");' \
+            '    printf("%s\\n", buffer);' \
+            '    free(buffer);' \
+            '    ' \
+            '    return 0;' \
+            '}' > extended_test_${{ matrix.variant }}.c
+
+          # Test with extended features
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -v "$PWD/${{ matrix.toolchain_dir }}:/opt/toolchain" \
+            debian:bullseye-20240211-slim \
+            bash -c "
+              set -x
+              cd /workspace
+
+              echo '=== Extended ${{ matrix.variant }} C compilation test ==='
+              /opt/toolchain/bin/${{ matrix.gcc_binary }} -static extended_test_${{ matrix.variant }}.c -o extended_test_${{ matrix.variant }} -lm
+              file extended_test_${{ matrix.variant }}
+
+              echo '=== Checking dependencies ==='
+              /opt/toolchain/bin/aarch64-*-readelf -d extended_test_${{ matrix.variant }} || true
+
+              echo '=== Sysroot verification ==='
+              find /opt/toolchain -name 'libc.so*' -o -name 'libm.so*' | head -5
+
+              echo '=== Header files check ==='
+              find /opt/toolchain -name 'stdio.h' -o -name 'math.h' | head -3
+            " 2>&1 | tee extended_verification_${{ matrix.variant }}.log
+
+          echo "✓ Extended ${{ matrix.variant }} verification completed" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload verification logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-logs-${{ matrix.variant }}-${{ matrix.test-type }}-${{ needs.build-toolchain.outputs.build-commit }}
+          path: |
+            verification-${{ matrix.variant }}.log
+            extended_verification_${{ matrix.variant }}.log
+            extended_test_${{ matrix.variant }}.c
+          retention-days: 7
+          compression-level: 6
+
+      - name: Performance summary
+        if: matrix.test-type == 'basic' && steps.download.outcome == 'success'
+        run: |
+          echo "=== ${{ matrix.variant }} Build Performance Summary ===" >> $GITHUB_STEP_SUMMARY
+          echo "- Toolchain: GCC ${{ env.TOOLCHAIN_VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Variant: ${{ matrix.variant }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Target: ${{ matrix.target_arch }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Runner: ${{ matrix.runner_type }} ($(uname -m))" >> $GITHUB_STEP_SUMMARY
+          echo "- Commit: ${{ needs.build-toolchain.outputs.build-commit }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Artifact: ${{ needs.build-toolchain.outputs[matrix.artifact_name_output] }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Checksum: ${{ needs.build-toolchain.outputs[matrix.checksum_output] }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **${{ matrix.variant }} verification passed successfully!**" >> $GITHUB_STEP_SUMMARY

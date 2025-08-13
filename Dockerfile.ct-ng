@@ -1,0 +1,36 @@
+FROM debian:bullseye
+
+# Install dependencies for crosstool-NG
+RUN apt-get update && apt-get install -y \
+    gcc g++ gperf bison flex texinfo help2man make libncurses5-dev \
+    python3-dev autoconf automake libtool libtool-bin gawk wget bzip2 xz-utils \
+    unzip patch libstdc++6 rsync git meson ninja-build curl sudo \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install crosstool-NG as root
+RUN git clone https://github.com/crosstool-ng/crosstool-ng.git \
+    && cd crosstool-ng \
+    && git checkout crosstool-ng-1.25.0 \
+    && ./bootstrap \
+    && ./configure --prefix=/usr/local \
+    && make \
+    && make install
+
+# Create a non-root user but give sudo access to write to /opt
+RUN useradd -m builder && \
+    echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+
+# Create target directories for both toolchain variants
+RUN mkdir -p /opt/aarch64-nextui-linux-gnu && \
+    mkdir -p /opt/x86_64-aarch64-nextui-linux-gnu && \
+    chown -R builder:builder /opt/aarch64-nextui-linux-gnu && \
+    chown -R builder:builder /opt/x86_64-aarch64-nextui-linux-gnu
+
+USER builder
+WORKDIR /home/builder
+
+# Create work directory
+RUN mkdir -p /home/builder/work
+WORKDIR /home/builder/work
+
+ENTRYPOINT ["ct-ng"]

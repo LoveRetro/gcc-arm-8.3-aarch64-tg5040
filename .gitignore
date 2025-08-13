@@ -1,0 +1,48 @@
+# Build artifacts
+*.dmg
+*.tar.xz
+*.tar.gz
+build-info.json
+
+# Temporary directories
+/Volumes/docker-build-env/
+.build/
+buildtools/
+
+# Docker build cache
+.buildx-cache/
+
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.log
+*.swp
+*.swo
+*~
+
+# IDE files
+.vscode/
+.idea/
+*.iml
+
+# Build outputs (will be in /Volumes/docker-build-env/)
+toolchain_output/
+toolchain_work/
+
+# Cached zlib workaround
+/tmp/zlib-1.2.12-proper.tar.gz
+
+# Test artifacts and debugging
+test_toolchain/
+fix_*.sh
+test_*.sh
+*_arm64
+*_arm64_*
