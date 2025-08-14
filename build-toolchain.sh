@@ -179,8 +179,9 @@ run_toolchain_build() {
         --entrypoint="" \
         "${DOCKER_IMAGE}" \
         bash -c "
-            # Ensure proper permissions for mounted directory
+            # Ensure proper permissions for mounted directories
             sudo chown -R builder:builder /home/builder/work
+            sudo chown -R builder:builder /output
             cd /home/builder/work
             ct-ng build.${BUILD_JOBS}
             echo 'Build completed, locating toolchain...'
