@@ -229,6 +229,9 @@ jobs:
           set -x
           echo "=== Optimizing artifact compression ==="
 
+          # Fix permissions for current directory
+          sudo chown -R $USER:$USER .
+
           # Extract and recompress with better compression
           mkdir -p temp_extract
           tar -xzf ${{ matrix.output_package }} -C temp_extract
