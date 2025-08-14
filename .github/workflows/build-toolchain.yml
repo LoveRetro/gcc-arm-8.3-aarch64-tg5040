@@ -251,6 +251,9 @@ jobs:
 
           # Use optimized version
           mv "${OPTIMIZED_NAME}" "${{ matrix.variant }}-toolchain.tar.xz"
+          
+          # Fix permissions before removal to handle read-only files
+          chmod -R u+w temp_extract
           rm -rf temp_extract ${{ matrix.output_package }}
 
       - name: Create checksums
