@@ -33,7 +33,7 @@ env:
 
 jobs:
   build-toolchain:
-    runs-on: ${{ matrix.variant == 'arm64' && 'ubuntu-24.04-arm64' || 'ubuntu-24.04' }}
+    runs-on: ${{ matrix.variant == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 90  # Reduced from 120 with caching
     
     strategy:
@@ -310,7 +310,7 @@ jobs:
 
   verify-toolchain:
     needs: build-toolchain
-    runs-on: ${{ matrix.variant == 'arm64' && 'ubuntu-24.04-arm64' || 'ubuntu-24.04' }}
+    runs-on: ${{ matrix.variant == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 15
 
     strategy:
