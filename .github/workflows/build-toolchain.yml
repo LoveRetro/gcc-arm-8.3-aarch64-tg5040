@@ -399,6 +399,9 @@ jobs:
             debian:bullseye-20240211-slim \
             bash -c "
               set -x
+              # Install required packages
+              apt-get update && apt-get install -y file
+              
               echo '=== ${{ matrix.variant }} Toolchain Info ==='
               /opt/toolchain/bin/${{ matrix.gcc_binary }} --version
 
@@ -451,6 +454,9 @@ jobs:
             bash -c "
               set -x
               cd /workspace
+              
+              # Install required packages
+              apt-get update && apt-get install -y file
 
               echo '=== Extended ${{ matrix.variant }} C compilation test ==='
               /opt/toolchain/bin/${{ matrix.gcc_binary }} -static extended_test_${{ matrix.variant }}.c -o extended_test_${{ matrix.variant }} -lm
