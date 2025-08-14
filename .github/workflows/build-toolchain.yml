@@ -499,3 +499,216 @@ jobs:
           echo "- Checksum: ${{ needs.build-toolchain.outputs[matrix.checksum_output] }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "✅ **${{ matrix.variant }} verification passed successfully!**" >> $GITHUB_STEP_SUMMARY
+
+  create-release:
+    needs: [build-toolchain, verify-toolchain]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    # Only create release on main branch for push events (not PRs)
+    if: |
+      always() && 
+      github.ref == 'refs/heads/main' && 
+      github.event_name == 'push' &&
+      contains(needs.build-toolchain.result, 'success') &&
+      contains(needs.verify-toolchain.result, 'success')
+    
+    permissions:
+      contents: write  # Required for creating releases
+      actions: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history for tag creation
+
+      - name: Generate release info
+        id: release-info
+        run: |
+          # Generate release tag and version
+          TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
+          COMMIT_SHORT="${{ needs.build-toolchain.outputs.build-commit }}"
+          RELEASE_TAG="v${{ env.TOOLCHAIN_VERSION }}-${TIMESTAMP}-${COMMIT_SHORT}"
+          RELEASE_NAME="GCC ${{ env.TOOLCHAIN_VERSION }} ARM64 Toolchain - ${TIMESTAMP}"
+          
+          echo "tag=${RELEASE_TAG}" >> $GITHUB_OUTPUT
+          echo "name=${RELEASE_NAME}" >> $GITHUB_OUTPUT
+          echo "timestamp=${TIMESTAMP}" >> $GITHUB_OUTPUT
+          
+          echo "Release tag: ${RELEASE_TAG}" >> $GITHUB_STEP_SUMMARY
+          echo "Release name: ${RELEASE_NAME}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Generate release notes
+        id: release-notes
+        run: |
+          # Create detailed release notes
+          cat > release_notes.md << 'EOF'
+          ## GCC ${{ env.TOOLCHAIN_VERSION }} ARM64 Cross-Compilation Toolchain
+          
+          **Build Information:**
+          - **Build Date:** ${{ steps.release-info.outputs.timestamp }}
+          - **Commit:** `${{ github.sha }}`
+          - **GCC Version:** ${{ env.TOOLCHAIN_VERSION }}
+          - **Target Architecture:** ARM64 (aarch64)
+          
+          **Available Variants:**
+          - **ARM64 Native:** `aarch64-nextui-linux-gnu` (built on ARM64 runner)
+          - **x86_64 Cross:** `x86_64-aarch64-nextui-linux-gnu` (built on x86_64 runner)
+          
+          **Checksums:**
+          - **ARM64:** `${{ needs.build-toolchain.outputs.artifact-checksum-arm64 }}`
+          - **x86_64:** `${{ needs.build-toolchain.outputs.artifact-checksum-x86_64 }}`
+          
+          **Verification Status:**
+          ✅ All toolchain variants built successfully  
+          ✅ Basic compilation tests passed  
+          ✅ Extended functionality tests passed  
+          ✅ Checksum verification completed  
+          
+          **What's Included:**
+          - Complete GCC ${{ env.TOOLCHAIN_VERSION }} cross-compilation toolchain
+          - C and C++ compiler support
+          - Standard libraries and headers
+          - Debugging tools (GDB, objdump, etc.)
+          - Static linking capabilities
+          
+          **Usage:**
+          1. Download the appropriate variant for your host architecture
+          2. Extract: `tar -xJf <toolchain-file>.tar.xz`
+          3. Add to PATH: `export PATH="/path/to/toolchain/bin:$PATH"`
+          4. Compile: `aarch64-nextui-linux-gnu-gcc your_code.c -o output`
+          
+          **Compatibility:**
+          - Host: Linux x86_64 or ARM64
+          - Target: ARM64/AArch64 Linux systems
+          - Libc: GNU libc (glibc)
+          
+          ---
+          
+          > **Note:** This is an automated release generated from the main branch.
+          > For issues or questions, please visit the repository.
+          EOF
+          
+          echo "Release notes generated" >> $GITHUB_STEP_SUMMARY
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gcc-${{ env.TOOLCHAIN_VERSION }}-*-toolchain-${{ needs.build-toolchain.outputs.build-commit }}
+          merge-multiple: true
+
+      - name: Prepare release assets
+        run: |
+          set -x
+          echo "=== Preparing release assets ==="
+          
+          # List downloaded artifacts
+          echo "Downloaded files:"
+          ls -la
+          
+          # Rename files to more user-friendly names for release
+          if [ -f "arm64-toolchain.tar.xz" ]; then
+            mv "arm64-toolchain.tar.xz" "gcc-${{ env.TOOLCHAIN_VERSION }}-aarch64-nextui-linux-gnu-arm64-host.tar.xz"
+          fi
+          
+          if [ -f "x86_64-toolchain.tar.xz" ]; then
+            mv "x86_64-toolchain.tar.xz" "gcc-${{ env.TOOLCHAIN_VERSION }}-aarch64-nextui-linux-gnu-x86_64-host.tar.xz"
+          fi
+          
+          # Combine checksums into a single file
+          cat checksums-*.txt > "checksums-all-${{ steps.release-info.outputs.timestamp }}.txt" 2>/dev/null || true
+          
+          echo "=== Release assets prepared ==="
+          echo "Final release files:"
+          ls -la gcc-${{ env.TOOLCHAIN_VERSION }}-*.tar.xz checksums-all-*.txt 2>/dev/null || true
+
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        id: create_release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.release-info.outputs.tag }}
+          release_name: ${{ steps.release-info.outputs.name }}
+          body_path: release_notes.md
+          draft: false
+          prerelease: false
+
+      - name: Upload ARM64 toolchain asset
+        if: hashFiles('gcc-${{ env.TOOLCHAIN_VERSION }}-aarch64-nextui-linux-gnu-arm64-host.tar.xz') != ''
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: gcc-${{ env.TOOLCHAIN_VERSION }}-aarch64-nextui-linux-gnu-arm64-host.tar.xz
+          asset_name: gcc-${{ env.TOOLCHAIN_VERSION }}-aarch64-nextui-linux-gnu-arm64-host.tar.xz
+          asset_content_type: application/x-xz
+
+      - name: Upload x86_64 toolchain asset
+        if: hashFiles('gcc-${{ env.TOOLCHAIN_VERSION }}-aarch64-nextui-linux-gnu-x86_64-host.tar.xz') != ''
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: gcc-${{ env.TOOLCHAIN_VERSION }}-aarch64-nextui-linux-gnu-x86_64-host.tar.xz
+          asset_name: gcc-${{ env.TOOLCHAIN_VERSION }}-aarch64-nextui-linux-gnu-x86_64-host.tar.xz
+          asset_content_type: application/x-xz
+
+      - name: Upload ARM64 checksums
+        if: hashFiles('checksums-arm64.txt') != ''
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: checksums-arm64.txt
+          asset_name: checksums-arm64.txt
+          asset_content_type: text/plain
+
+      - name: Upload x86_64 checksums
+        if: hashFiles('checksums-x86_64.txt') != ''
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: checksums-x86_64.txt
+          asset_name: checksums-x86_64.txt
+          asset_content_type: text/plain
+
+      - name: Upload combined checksums
+        if: hashFiles('checksums-all-*.txt') != ''
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: checksums-all-${{ steps.release-info.outputs.timestamp }}.txt
+          asset_name: checksums-all-${{ steps.release-info.outputs.timestamp }}.txt
+          asset_content_type: text/plain
+
+      - name: Release summary
+        run: |
+          echo "## 🚀 Release Created Successfully!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Release Details:**" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tag:** \`${{ steps.release-info.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Name:** ${{ steps.release-info.outputs.name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **URL:** ${{ steps.create_release.outputs.html_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Assets Uploaded:**" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -f "gcc-${{ env.TOOLCHAIN_VERSION }}-aarch64-nextui-linux-gnu-arm64-host.tar.xz" ]; then
+            echo "✅ ARM64 host toolchain" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ -f "gcc-${{ env.TOOLCHAIN_VERSION }}-aarch64-nextui-linux-gnu-x86_64-host.tar.xz" ]; then
+            echo "✅ x86_64 host toolchain" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "✅ Checksum files" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "🎉 **Toolchain release is now available for download!**" >> $GITHUB_STEP_SUMMARY
