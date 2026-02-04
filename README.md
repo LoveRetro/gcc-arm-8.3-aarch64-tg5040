@@ -99,6 +99,7 @@ This project builds upon:
 - **binutils** - GNU General Public License
 - **crosstool-NG** - GNU General Public License
 
+
 See individual component licenses for details.
 
 ---
